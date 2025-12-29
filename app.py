@@ -5,9 +5,6 @@ import os
 import streamlit as st
 import pandas as pd
 
-# =====================================================
-# 1. CẤU HÌNH & TẢI MODEL
-# =====================================================
 MODEL_PATH = "xgboost_model.pkl"
 SCALER_PATH = "z_scaler.pkl"
 FEATURE_COLS_PATH = "feature_columns.json"
@@ -34,22 +31,16 @@ if model is None:
 else:
     FEATURE_COLS = result
 
-# =====================================================
-# 2. TIỆN ÍCH PHÂN TÍCH
-# =====================================================
 def process_prediction(feature_dict):
-    """Xử lý tạo dataframe, scaling và dự đoán"""
     X = pd.DataFrame([feature_dict])
     for col in FEATURE_COLS:
         if col not in X.columns:
             X[col] = 0
     X = X[FEATURE_COLS]
-    
-    # Scaling dữ liệu
+  
     X_scaled = X.copy()
     X_scaled[SCALE_COLS] = scaler.transform(X_scaled[SCALE_COLS])
-    
-    # Dự đoán
+  
     pred = int(model.predict(X_scaled)[0])
     prob = None
     try:
@@ -82,22 +73,17 @@ def get_process_df():
         return pd.DataFrame()
     return pd.DataFrame(rows)
 
-# =====================================================
-# 3. GIAO DIỆN NGƯỜI DÙNG (UI)
-# =====================================================
 st.set_page_config(page_title="Anomaly Detection", layout="wide", page_icon="🛡️")
 
 st.title("🛡️ OS Process Anomaly Detection")
 st.caption("Phát hiện hành vi bất thường của tiến trình hệ thống")
 
-# Sidebar
 st.sidebar.header("⚙️ Cấu hình")
 mode = st.sidebar.radio("Chế độ nhập dữ liệu", ["🖥️ Chọn tiến trình đang chạy", "✍️ Nhập thủ công"])
 if st.sidebar.button("🔄 Làm mới danh sách"):
     st.cache_data.clear()
     st.rerun()
 
-# Khởi tạo biến dữ liệu
 X_model_input = None
 current_process_name = ""
 
@@ -112,11 +98,9 @@ if mode == "🖥️ Chọn tiến trình đang chạy":
         df_proc["label"] = df_proc.apply(lambda r: f"{r['name']} (PID: {r.pid})", axis=1)
         selected_label = st.selectbox("Chọn tiến trình cần kiểm tra:", df_proc["label"].tolist())
         
-        # Lấy dữ liệu của tiến trình được chọn
-        row = df_proc[df_proc["label"] == selected_label].iloc[0]
-        current_process_name = row['name'] # Lưu tên để hiện thị bên dưới
 
-        # Hiển thị nhanh thông tin
+        row = df_proc[df_proc["label"] == selected_label].iloc[0]
+        current_process_name = row['name'] 
         st.success(f"🎯 **Đang phân tích tiến trình:** `{current_process_name}`")
         
         col_info1, col_info2, col_info3 = st.columns(3)
@@ -129,7 +113,6 @@ if mode == "🖥️ Chọn tiến trình đang chạy":
             "threadId": row.threadId, "argsNum": row.argsNum,
             "mountNamespace": row.mountNamespace, "returnValue": row.returnValue
         }
-        # Tự động tạo đầu vào model
         _, _, X_model_input = process_prediction(feature_dict)
         final_feature_dict = feature_dict
 
@@ -150,14 +133,11 @@ else:
     }
     _, _, X_model_input = process_prediction(final_feature_dict)
 
-# =====================================================
-# 4. KẾT QUẢ DỰ ĐOÁN
-# =====================================================
+
 if X_model_input is not None:
     st.divider()
     st.subheader(f"🤖 Kết quả phân tích: {current_process_name}")
     
-    # Thực hiện dự đoán lần cuối để lấy Label và Prob
     pred_label, prob, _ = process_prediction(final_feature_dict)
     
     col_res1, col_res2 = st.columns([1, 2])
@@ -176,3 +156,4 @@ if X_model_input is not None:
     with col_res2:
         with st.expander("Xem chi tiết Vector đặc trưng (Scaled)"):
             st.dataframe(X_model_input)
+
