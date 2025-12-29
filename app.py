@@ -6,22 +6,18 @@ import streamlit as st
 import pandas as pd
 
 # =====================================================
-# CONFIG
+# 1. CẤU HÌNH & TẢI MODEL
 # =====================================================
 MODEL_PATH = "xgboost_model.pkl"
 SCALER_PATH = "z_scaler.pkl"
 FEATURE_COLS_PATH = "feature_columns.json"
 SCALE_COLS = ["argsNum", "returnValue"]
 
-# =====================================================
-# LOAD ARTIFACTS (Thêm try-except để chống trắng trang)
-# =====================================================
 @st.cache_resource
 def load_artifacts():
     try:
         if not os.path.exists(MODEL_PATH):
             return None, None, f"Không tìm thấy file {MODEL_PATH}"
-        
         model = joblib.load(MODEL_PATH)
         scaler = joblib.load(SCALER_PATH)
         with open(FEATURE_COLS_PATH, "r") as f:
@@ -30,52 +26,41 @@ def load_artifacts():
     except Exception as e:
         return None, None, str(e)
 
-# Khởi tạo load
 model, scaler, result = load_artifacts()
 
-# Kiểm tra nếu load lỗi thì dừng app và hiện lỗi ngay
 if model is None:
     st.error(f"❌ Lỗi khởi tạo ứng dụng: {result}")
-    st.info("Hãy đảm bảo các file .pkl và .json đã được upload lên GitHub cùng thư mục với file code.")
     st.stop()
 else:
     FEATURE_COLS = result
 
 # =====================================================
-# PAGE CONFIG
+# 2. TIỆN ÍCH PHÂN TÍCH
 # =====================================================
-st.set_page_config(
-    page_title="OS Process Anomaly Detection",
-    layout="wide",
-    page_icon="🛡️"
-)
-
-st.title("🛡️ Real-time Process Anomaly Detection")
-st.caption("Ứng dụng phát hiện tiến trình bất thường dựa trên Machine Learning")
-
-# =====================================================
-# UTILS
-# =====================================================
-def build_model_input(feature_dict: dict):
+def process_prediction(feature_dict):
+    """Xử lý tạo dataframe, scaling và dự đoán"""
     X = pd.DataFrame([feature_dict])
-    # Đảm bảo đủ feature theo đúng thứ tự model yêu cầu
     for col in FEATURE_COLS:
         if col not in X.columns:
             X[col] = 0
     X = X[FEATURE_COLS]
     
-    # Scale dữ liệu
+    # Scaling dữ liệu
     X_scaled = X.copy()
+    X_scaled[SCALE_COLS] = scaler.transform(X_scaled[SCALE_COLS])
+    
+    # Dự đoán
+    pred = int(model.predict(X_scaled)[0])
+    prob = None
     try:
-        X_scaled[SCALE_COLS] = scaler.transform(X_scaled[SCALE_COLS])
-    except Exception as e:
-        st.warning(f"Lỗi khi scale dữ liệu: {e}")
-    return X_scaled
+        prob = model.predict_proba(X_scaled)[0][1]
+    except:
+        pass
+    return pred, prob, X_scaled
 
 @st.cache_data(ttl=5)
 def get_process_df():
     rows = []
-    # Streamlit Cloud chạy trên Linux container, psutil có thể bị hạn chế
     try:
         for p in psutil.process_iter(['pid', 'name', 'ppid', 'uids', 'num_threads', 'cmdline']):
             try:
@@ -87,111 +72,107 @@ def get_process_df():
                     "userId": info['uids'].real if info['uids'] else 0,
                     "threadId": info['num_threads'] or 0,
                     "argsNum": len(info['cmdline']) if info['cmdline'] else 0,
-                    "mountNamespace": os.getpid(), # Giá trị giả định
+                    "mountNamespace": os.getpid(),
                     "returnValue": 0
                 })
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
     except Exception as e:
-        st.sidebar.error(f"Cảnh báo hệ thống: {e}")
-        # Trả về dữ liệu trống nếu bị hệ thống chặn hoàn toàn
+        st.sidebar.error(f"Lỗi truy cập hệ thống: {e}")
         return pd.DataFrame()
-
     return pd.DataFrame(rows)
 
 # =====================================================
-# SIDEBAR
+# 3. GIAO DIỆN NGƯỜI DÙNG (UI)
 # =====================================================
+st.set_page_config(page_title="Anomaly Detection", layout="wide", page_icon="🛡️")
+
+st.title("🛡️ OS Process Anomaly Detection")
+st.caption("Phát hiện hành vi bất thường của tiến trình hệ thống")
+
+# Sidebar
 st.sidebar.header("⚙️ Cấu hình")
-mode = st.sidebar.radio(
-    "Chọn phương thức nhập dữ liệu",
-    ["✍️ Manual Input (Khuyên dùng trên Cloud)", "🖥️ Select Running Process"]
-)
+mode = st.sidebar.radio("Chế độ nhập dữ liệu", ["🖥️ Chọn tiến trình đang chạy", "✍️ Nhập thủ công"])
+if st.sidebar.button("🔄 Làm mới danh sách"):
+    st.cache_data.clear()
+    st.rerun()
 
-refresh = st.sidebar.button("🔄 Làm mới danh sách tiến trình")
-if refresh:
-    get_process_df.clear()
+# Khởi tạo biến dữ liệu
+X_model_input = None
+current_process_name = ""
 
-# Biến trung gian để chứa input cho model
-X_model = None
-
-# =====================================================
-# MODE 1 — SELECT RUNNING PROCESS
-# =====================================================
-if mode == "🖥️ Select Running Process":
-    st.header("🖥️ Kiểm tra tiến trình đang chạy")
+if mode == "🖥️ Chọn tiến trình đang chạy":
+    st.header("🔍 Quét tiến trình hệ thống")
     df_proc = get_process_df()
 
     if df_proc.empty:
-        st.warning("⚠️ Không thể quét danh sách tiến trình (Có thể do hạn chế quyền trên Cloud). Hãy sử dụng Manual Input.")
+        st.warning("⚠️ Không thể lấy danh sách tiến trình. Vui lòng sử dụng chế độ 'Nhập thủ công'.")
     else:
-        df_proc["label"] = df_proc.apply(lambda r: f"PID {r.pid} — {r.name}", axis=1)
-        selected_label = st.selectbox("Chọn một tiến trình từ danh sách", df_proc["label"].tolist())
+        # Tạo nhãn: "facebook.exe (PID: 1234)"
+        df_proc["label"] = df_proc.apply(lambda r: f"{r['name']} (PID: {r.pid})", axis=1)
+        selected_label = st.selectbox("Chọn tiến trình cần kiểm tra:", df_proc["label"].tolist())
+        
+        # Lấy dữ liệu của tiến trình được chọn
         row = df_proc[df_proc["label"] == selected_label].iloc[0]
+        current_process_name = row['name'] # Lưu tên để hiện thị bên dưới
 
-        # Hiển thị thông tin Raw
-        st.subheader("📊 Thông tin hệ thống (Raw)")
-        st.json({
-            "PID": int(row.pid), "Name": row.name, "PPID": int(row.parentProcessId),
-            "User ID": int(row.userId), "Threads": int(row.threadId), "ArgsNum": int(row.argsNum)
-        })
+        # Hiển thị nhanh thông tin
+        st.success(f"🎯 **Đang phân tích tiến trình:** `{current_process_name}`")
+        
+        col_info1, col_info2, col_info3 = st.columns(3)
+        col_info1.metric("PID", row.pid)
+        col_info2.metric("PPID", row.parentProcessId)
+        col_info3.metric("Threads", row.threadId)
 
         feature_dict = {
             "parentProcessId": row.parentProcessId, "userId": row.userId,
             "threadId": row.threadId, "argsNum": row.argsNum,
             "mountNamespace": row.mountNamespace, "returnValue": row.returnValue
         }
-        X_model = build_model_input(feature_dict)
+        # Tự động tạo đầu vào model
+        _, _, X_model_input = process_prediction(feature_dict)
+        final_feature_dict = feature_dict
 
-# =====================================================
-# MODE 2 — MANUAL INPUT
-# =====================================================
 else:
     st.header("✍️ Nhập thông số thủ công")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        parent_pid = st.number_input("parentProcessId", value=0)
-        user_id = st.number_input("userId", value=0)
-    with col2:
-        thread_id = st.number_input("threadId", value=1)
-        args_num = st.number_input("argsNum", value=0)
-    with col3:
-        mount_ns = st.number_input("mountNamespace", value=0)
-        return_value = st.number_input("returnValue", value=0)
-
-    feature_dict = {
-        "parentProcessId": parent_pid, "userId": user_id, "threadId": thread_id,
-        "argsNum": args_num, "mountNamespace": mount_ns, "returnValue": return_value
+    current_process_name = "Manual Input"
+    c1, c2, c3 = st.columns(3)
+    p_id = c1.number_input("parentProcessId", 0)
+    u_id = c1.number_input("userId", 0)
+    t_id = c2.number_input("threadId", 1)
+    a_num = c2.number_input("argsNum", 0)
+    m_ns = c3.number_input("mountNamespace", 0)
+    r_val = c3.number_input("returnValue", 0)
+    
+    final_feature_dict = {
+        "parentProcessId": p_id, "userId": u_id, "threadId": t_id,
+        "argsNum": a_num, "mountNamespace": m_ns, "returnValue": r_val
     }
-    X_model = build_model_input(feature_dict)
+    _, _, X_model_input = process_prediction(final_feature_dict)
 
 # =====================================================
-# INFERENCE (Dự đoán)
+# 4. KẾT QUẢ DỰ ĐOÁN
 # =====================================================
-if X_model is not None:
+if X_model_input is not None:
     st.divider()
-    st.subheader("🧬 Vector đặc trưng (Model Input)")
-    st.dataframe(X_model)
-
-    st.subheader("🤖 Kết quả dự đoán từ Model")
-    try:
-        # Dự đoán
-        prediction = model.predict(X_model)
-        pred_label = int(prediction[0])
-        
-        # Thử lấy xác suất nếu model hỗ trợ
-        try:
-            prob = model.predict_proba(X_model)[0][1]
-            st.write(f"Độ tin cậy của bất thường: {prob:.2%}")
-        except:
-            pass
-
+    st.subheader(f"🤖 Kết quả phân tích: {current_process_name}")
+    
+    # Thực hiện dự đoán lần cuối để lấy Label và Prob
+    pred_label, prob, _ = process_prediction(final_feature_dict)
+    
+    col_res1, col_res2 = st.columns([1, 2])
+    
+    with col_res1:
         if pred_label == 1:
-            st.error("🚨 PHÁT HIỆN BẤT THƯỜNG (Anomaly Detected)")
-            st.warning("Tiến trình này có các dấu hiệu không giống với hoạt động bình thường của hệ thống.")
+            st.error(f"🚨 **PHÁT HIỆN BẤT THƯỜNG TRÊN {current_process_name.upper()}**")
+            st.warning("Hành vi này có dấu hiệu xâm nhập hoặc tiến trình lạ.")
         else:
-            st.success("✅ TIẾN TRÌNH BÌNH THƯỜNG (Normal Process)")
-            st.info("Không phát hiện dấu hiệu xâm nhập hoặc lỗi hệ thống.")
+            st.success(f"✅ **{current_process_name} HOẠT ĐỘNG BÌNH THƯỜNG**")
+            st.info("Không phát hiện dấu hiệu đe dọa.")
+        
+        if prob is not None:
+            st.write(f"**Độ tin cậy:** `{prob:.2%}`")
 
-    except Exception as e:
-        st.exception(f"Lỗi khi thực hiện dự đoán: {e}")
+    with col_res2:
+        with st.expander("Xem chi tiết Vector đặc trưng (Scaled)"):
+            st.dataframe(X_model_input)
