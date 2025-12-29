@@ -1,6 +1,7 @@
 import json
 import joblib
 import os
+import time
 import streamlit as st
 import pandas as pd
 
@@ -10,13 +11,12 @@ import pandas as pd
 MODEL_PATH = "xgboost_model.pkl"
 SCALER_PATH = "z_scaler.pkl"
 FEATURE_COLS_PATH = "feature_columns.json"
+TEST_FILE_PATH = "test.csv" # File có sẵn trong Git
 SCALE_COLS = ["argsNum", "returnValue"]
 
 @st.cache_resource
 def load_artifacts():
     try:
-        if not os.path.exists(MODEL_PATH):
-            return None, None, f"Không tìm thấy file {MODEL_PATH}"
         model = joblib.load(MODEL_PATH)
         scaler = joblib.load(SCALER_PATH)
         with open(FEATURE_COLS_PATH, "r") as f:
@@ -28,117 +28,98 @@ def load_artifacts():
 model, scaler, FEATURE_COLS = load_artifacts()
 
 # =====================================================
-# 2. HÀM XỬ LÝ LỌC TIẾN TRÌNH (VÒNG LẶP)
+# 2. GIAO DIỆN
 # =====================================================
-def scan_processes(df_input):
-    """
-    Duyệt qua từng dòng trong file test, dự đoán và lọc ra danh sách lỗi
-    """
-    anomalies = []
-    normal_count = 0
-    
-    # Đảm bảo dataframe có đủ các cột cần thiết, thiếu thì bù bằng 0
-    for col in FEATURE_COLS:
-        if col not in df_input.columns:
-            df_input[col] = 0
+st.set_page_config(page_title="Network-style Anomaly Detector", layout="wide")
 
-    # Lấy dữ liệu theo đúng thứ tự Feature model yêu cầu
-    X_raw = df_input[FEATURE_COLS].copy()
-    
-    # Scale dữ liệu hàng loạt để tăng tốc độ (thay vì lặp từng dòng để scale)
-    X_scaled = X_raw.copy()
-    X_scaled[SCALE_COLS] = scaler.transform(X_scaled[SCALE_COLS])
-    
-    # Dự đoán toàn bộ
-    predictions = model.predict(X_scaled)
-    
-    # Nếu model có predict_proba thì lấy xác suất
-    probs = [None] * len(predictions)
-    try:
-        probs = model.predict_proba(X_scaled)[:, 1]
-    except:
-        pass
+# CSS để giả lập giao diện console/wireshark
+st.markdown("""
+    <style>
+    .scanner-text { font-family: 'Courier New', Courier, monospace; font-size: 14px; }
+    .anomaly-list { background-color: #ffeded; border-radius: 5px; padding: 10px; border: 1px solid #ff4b4b; }
+    </style>
+    """, unsafe_allow_html=True)
 
-    # Vòng lặp duyệt qua kết quả để phân loại
-    for i in range(len(predictions)):
-        if predictions[i] == 1:
-            # Lưu lại thông tin tiến trình bị lỗi
-            # Giả sử file test có cột 'name' hoặc 'pid', nếu không có sẽ báo 'Unknown'
-            proc_info = {
-                "Tên": df_input.iloc[i].get("name", "Unknown"),
-                "PID": df_input.iloc[i].get("pid", "N/A"),
-                "Mức độ rủi ro": f"{probs[i]:.2%}" if probs[i] is not None else "N/A"
-            }
-            # Thêm các chỉ số đặc trưng vào để xem lý do lỗi
-            for col in FEATURE_COLS:
-                proc_info[col] = df_input.iloc[i][col]
-            
-            anomalies.append(proc_info)
-        else:
-            normal_count += 1
-            
-    return pd.DataFrame(anomalies), normal_count
+st.title("🛡️ Live Process Security Monitor")
+st.caption("Mô phỏng bắt tín hiệu tiến trình theo thời gian thực (Wireshark Style)")
 
-# =====================================================
-# 3. GIAO DIỆN CHÍNH
-# =====================================================
-st.set_page_config(page_title="Batch Anomaly Detector", layout="wide", page_icon="🛡️")
+# Khởi tạo Session State để lưu danh sách Anomaly
+if "anomaly_history" not in st.session_state:
+    st.session_state.anomaly_history = []
 
-st.title("🛡️ Batch Process Security Scanner")
-st.caption("Tải lên file dữ liệu test để mô hình tự động quét và lọc tiến trình độc hại")
-
-# Sidebar: Hướng dẫn file mẫu
+# Sidebar điều khiển
 with st.sidebar:
-    st.header("📂 Hướng dẫn file Test")
-    st.write("File cần có các cột:")
-    st.code(", ".join(FEATURE_COLS))
-    st.info("Hệ thống sẽ lặp qua từng tiến trình để phân tích.")
+    st.header("🎮 Điều khiển")
+    speed = st.slider("Tốc độ quét (giây/tiến trình)", 0.1, 2.0, 0.5)
+    run_btn = st.button("🚀 Bắt đầu giám sát")
+    if st.button("🗑️ Xóa lịch sử"):
+        st.session_state.anomaly_history = []
+        st.rerun()
+    
+    st.divider()
+    uploaded_file = st.file_uploader("Hoặc tải file test mới", type=["csv"])
 
-# Giao diện tải File
-uploaded_file = st.file_uploader("Chọn file dữ liệu (CSV hoặc Excel)", type=["csv", "xlsx"])
+# Xác định file nguồn
+source_file = uploaded_file if uploaded_file else (TEST_FILE_PATH if os.path.exists(TEST_FILE_PATH) else None)
 
-if uploaded_file is not None:
-    # Đọc dữ liệu
-    try:
-        if uploaded_file.name.endswith('.csv'):
-            df_test = pd.read_csv(uploaded_file)
-        else:
-            df_test = pd.read_excel(uploaded_file)
-        
-        st.write(f"📊 Đã tải lên **{len(df_test)}** tiến trình.")
-        
-        if st.button("🚀 Bắt đầu quét hệ thống"):
-            with st.spinner('Đang chạy vòng lặp kiểm tra từng tiến trình...'):
-                df_anomalies, normal_count = scan_processes(df_test)
+# =====================================================
+# 3. LUỒNG CHẠY CHÍNH
+# =====================================================
+if source_file:
+    df_test = pd.read_csv(source_file)
+    
+    # Chia giao diện thành 2 cột: Trái (Live Stream), Phải (Anomaly List)
+    col_live, col_anomaly = st.columns([1.5, 1])
+
+    with col_live:
+        st.subheader("📡 Live Process Stream")
+        stream_placeholder = st.empty() # Nơi hiện dòng text chạy như Wireshark
+
+    with col_anomaly:
+        st.subheader("🚨 Detected Anomalies")
+        anomaly_placeholder = st.empty() # Nơi hiện danh sách lỗi
+
+    if run_btn:
+        logs = []
+        for index, row in df_test.iterrows():
+            # 1. Lấy dữ liệu thô (Raw)
+            raw_features = row[FEATURE_COLS].to_dict()
             
-            # Hiển thị kết quả tổng quan bằng cột
-            st.divider()
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Tổng số quét", len(df_test))
-            c2.metric("Tiến trình Bình thường", normal_count)
-            c3.metric("Tiến trình Bất thường", len(df_anomalies), delta_color="inverse")
+            # 2. Tiền xử lý & Dự đoán
+            X_df = pd.DataFrame([raw_features])
+            X_scaled = X_df.copy()
+            X_scaled[SCALE_COLS] = scaler.transform(X_scaled[SCALE_COLS])
+            
+            pred = model.predict(X_scaled[FEATURE_COLS])[0]
+            
+            # 3. Cập nhật giao diện Live Stream (Giống Wireshark)
+            status_icon = "⚪" if pred == 0 else "🔴"
+            log_entry = f"{status_icon} ID: {index} | Name: {row.get('name', 'Proc_'+str(index))} | Threads: {row.get('threadId', 0)}"
+            logs.insert(0, log_entry) # Đẩy tin mới lên đầu
+            stream_placeholder.code("\n".join(logs[:15])) # Chỉ hiện 15 dòng gần nhất
 
-            # Hiển thị danh sách bị lỗi
-            if not df_anomalies.empty:
-                st.error(f"🚨 Phát hiện {len(df_anomalies)} tiến trình có dấu hiệu nguy hiểm!")
-                st.subheader("📋 Danh sách đen (Blacklist) đã lọc:")
-                
-                # Highlight các dòng lỗi
-                st.dataframe(df_anomalies.style.background_gradient(cmap='Reds', subset=['Mức độ rủi ro'] if "Mức độ rủi ro" in df_anomalies.columns else []))
-                
-                # Cho phép tải về kết quả lỗi
-                csv = df_anomalies.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Tải danh sách lỗi (.csv)", csv, "detected_anomalies.csv", "text/csv")
-            else:
-                st.success("✅ Tuyệt vời! Không phát hiện tiến trình nào bất thường trong file này.")
+            # 4. Nếu là Anomaly -> Đẩy sang cột phải
+            if pred == 1:
+                # Lưu thông tin thô để xem lại
+                anomaly_item = {
+                    "id": index,
+                    "name": row.get('name', f"Process_{index}"),
+                    "raw_data": raw_features
+                }
+                st.session_state.anomaly_history.append(anomaly_item)
+            
+            # Hiển thị danh sách Anomaly bên phải ngay lập tức
+            with anomaly_placeholder.container():
+                for item in reversed(st.session_state.anomaly_history):
+                    with st.expander(f"🔴 ID: {item['id']} - {item['name']}"):
+                        st.write("**Chỉ số thô (Raw Features):**")
+                        st.json(item['raw_data'])
+            
+            time.sleep(speed)
+        
+        st.success("🏁 Hoàn thành quét file test.")
 
-    except Exception as e:
-        st.error(f"Lỗi khi xử lý file: {e}")
-
+    elif not st.session_state.anomaly_history:
+        stream_placeholder.info("Nhấn 'Bắt đầu giám sát' để chạy dữ liệu.")
 else:
-    # Giao diện khi chưa tải file
-    st.info("Vui lòng tải lên file dữ liệu test để bắt đầu quá trình lọc.")
-    # Hiển thị ví dụ cấu trúc dữ liệu model cần
-    st.subheader("Ví dụ cấu trúc dữ liệu hợp lệ:")
-    example_data = pd.DataFrame([[0, 0, 1, 0, 0, 0]], columns=FEATURE_COLS)
-    st.table(example_data)
+    st.error("❌ Không tìm thấy file test.csv. Vui lòng kiểm tra lại trong Git hoặc tải lên thủ công.")
